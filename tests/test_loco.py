@@ -1,0 +1,153 @@
+"""Fast CPU checks with no training logs or external robot projects."""
+from collections import deque
+from pathlib import Path
+from types import SimpleNamespace as NS
+import importlib.util
+import numpy as np
+import torch
+from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommandCfg
+from wbc_mjlab.casbot02_config import casbot02_loco_teacher_env_cfg
+from wbc_mjlab.casbot02_constants import get_spec
+from wbc_mjlab.casbot02_symmetry import compute_symmetric_states, mirror_loco_observation
+from tensordict import TensorDict
+from mjlab.managers.observation_manager import ObservationManager
+from wbc_mjlab.observations import loco_phase_features
+from wbc_mjlab.rewards import gait_phase_contact
+
+
+def test_robot_asset_and_command_configuration():
+  model = get_spec().compile()
+  assert model.nmesh == 32
+  cfg = casbot02_loco_teacher_env_cfg()
+  cmd = cfg.commands['twist']
+  assert type(cmd) is UniformVelocityCommandCfg
+  assert (cmd.rel_standing_envs, cmd.rel_heading_envs, cmd.rel_forward_envs) == (.1, .3, .2)
+  assert cmd.ranges.lin_vel_y == (0., 0.)
+  assert len(cfg.actions['joint_pos'].actuator_names) == 12
+
+
+def test_phase_rewards_and_observation_layout():
+  cfg = casbot02_loco_teacher_env_cfg()
+  assert 'swing_height_curve' not in cfg.rewards
+  assert cfg.rewards['gait_phase_contact'].weight == 1.0
+  for name in ('air_time', 'feet_air_time', 'turning_air_time'):
+    assert cfg.rewards[name].weight == 0.
+  assert cfg.rewards['foot_clearance'].params['target_height'] == .07
+  assert cfg.rewards['foot_swing_height'].params['target_height'] == .10
+  for name in ('actor', 'critic'):
+    group = cfg.observations[name]
+    assert group.history_length is None
+    assert all(term.history_length == 4 for term in group.terms.values())
+    assert group.terms['phase'].params['gait_period'] == 1.0
+  gait = cfg.rewards['gait_phase_contact'].params
+  assert gait['gait_period'] == 1.0
+  assert gait['stance_ratio'] == .55
+  assert np.isclose(gait['gait_period'] * (1 - gait['stance_ratio']), .45)
+
+
+def test_contact_shaping_prefers_lift_and_standing_double_support():
+  env = NS(episode_length_buf=torch.tensor([25, 25, 25]), step_dt=.01,
+           command_manager=NS(get_term=lambda _: NS(is_standing_env=torch.tensor([False, False, True]))),
+           scene={'feet': NS(data=NS(force=torch.tensor([
+             [[0., 0., 100.], [0., 0., 100.]],
+             [[0., 0., 100.], [0., 0., 0.]],
+             [[0., 0., 100.], [0., 0., 100.]],
+           ])))})
+  torch.testing.assert_close(.5 * gait_phase_contact(env, 'feet'), torch.tensor([.5, 1., 1.]))
+
+
+def test_symmetry_swaps_phase_and_is_an_involution():
+  for size, length in ((180, None), (192, None), (184, 0), (196, 0), (196, 4), (208, 4)):
+    obs = torch.arange(size, dtype=torch.float32).unsqueeze(0)
+    mirrored = mirror_loco_observation(obs, phase_history_length=length)
+    torch.testing.assert_close(mirror_loco_observation(mirrored, phase_history_length=length), obs)
+    if length is not None:
+      end = 180 + 4 * max(1, length)
+      expected = obs[:, 180:end].reshape(1, -1, 4)[..., [2, 3, 0, 1]].flatten(1)
+      torch.testing.assert_close(mirrored[:, 180:end], expected)
+
+
+def test_sim2sim_clock_matches_training():
+  root = Path(__file__).resolve().parents[1]
+  spec = importlib.util.spec_from_file_location('sim', root / 'scripts/sim2sim_casbot02_loco_onnx.py')
+  sim = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(sim)
+  for step, standing in ((0, False), (25, False), (75, False), (25, True)):
+    env = NS(episode_length_buf=torch.tensor([step]), step_dt=.01,
+             command_manager=NS(get_term=lambda _: NS(is_standing_env=torch.tensor([standing]))))
+    cmd = np.array([0., 0., 0. if standing else .5])
+    phase = sim.gait_phase_features(step * .01, cmd)
+    np.testing.assert_allclose(phase, loco_phase_features(env).numpy()[0], atol=1e-6)
+    history = deque([np.zeros(45, dtype=np.float32)] * 4)
+    assert sim.build_obs_term_major(history).shape == (1, 180)
+    obs = sim.build_obs_term_major(history, phase)
+    assert obs.shape == (1, 184)
+    np.testing.assert_array_equal(obs[0, 180:], phase)
+
+
+def test_phase_augmentation_disambiguates_old_critic_from_new_actor():
+  cfg = casbot02_loco_teacher_env_cfg()
+  for actor_size, critic_size, length in ((196, 208, 4), (184, 196, 0)):
+    for group in cfg.observations.values():
+      group.terms["phase"].history_length = length
+    obs = TensorDict({"actor": torch.arange(actor_size).float().reshape(1, -1),
+                      "critic": torch.arange(critic_size).float().reshape(1, -1)}, batch_size=[1])
+    augmented, _ = compute_symmetric_states(NS(cfg=cfg), obs=obs)
+    for key in obs.keys():
+      torch.testing.assert_close(augmented[key][:1], obs[key])
+      torch.testing.assert_close(augmented[key][1:], mirror_loco_observation(
+        obs[key], phase_history_length=length))
+
+
+
+def _frame_term(env, name):
+  return env.frames[name]
+
+
+
+def test_phase_history_sim2sim_matches_observation_manager_and_reset():
+  root = Path(__file__).resolve().parents[1]
+  spec = importlib.util.spec_from_file_location("casbot_sim", root / "scripts/sim2sim_casbot02_loco_onnx.py")
+  sim = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(sim)
+  cfg = casbot02_loco_teacher_env_cfg(play=True)
+  dims = dict(base_ang_vel=3, projected_gravity=3, command=3,
+              joint_pos=12, joint_vel=12, actions=12, phase=4, base_lin_vel=3)
+  env = NS(num_envs=1, device="cpu", frames={name: torch.zeros(1, d) for name, d in dims.items()})
+  # Keep the real configured term order, history lengths and flattening;
+  # supply deterministic frames without requiring a physics environment.
+  for group in cfg.observations.values():
+    for name, term in group.terms.items():
+      term.func = _frame_term
+      term.params = {"name": name}
+  manager = ObservationManager(cfg.observations, env)
+  history = deque(maxlen=4)
+  phase_history = deque(maxlen=4)
+  for step in range(9):
+    if step == 6:
+      manager.reset(torch.tensor([0]))
+      history.clear()
+      phase_history.clear()
+    command = np.array([.5 if 1 <= step < 5 else 0., 0., 0.])
+    phase = sim.gait_phase_features(step * .02, command)
+    frame = np.arange(45, dtype=np.float32) + step * 100
+    frame[6:9] = command
+    offset = 0
+    for name, width in list(dims.items())[:6]:
+      env.frames[name] = torch.from_numpy(frame[offset:offset + width].copy()).reshape(1, -1)
+      offset += width
+    env.frames["phase"] = torch.from_numpy(phase).reshape(1, -1)
+    if not history:
+      history.extend([frame] * 4)
+      phase_history.extend([phase] * 4)
+    else:
+      history.append(frame)
+      phase_history.append(phase)
+    actual = manager.compute(update_history=True)
+    deployed = sim.build_obs_term_major(history, np.asarray(phase_history))
+    assert actual["actor"].shape == (1, 196)
+    assert actual["critic"].shape == (1, 208)
+    np.testing.assert_allclose(deployed, actual["actor"].numpy(), atol=1e-6)
+    np.testing.assert_allclose(deployed[0, 180:].reshape(4, 4), np.asarray(phase_history))
+    np.testing.assert_allclose(actual["critic"][:, :196].numpy(), deployed)
+
