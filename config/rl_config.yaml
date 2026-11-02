@@ -1,0 +1,151 @@
+LeggedRobotCfg:
+
+  rl_mode: amp # rl,amp
+
+  # Loco: 12 actions, 45x4 term-major history + 4x4 gait-phase history
+  amp:
+    model_file_path: "/workspace/rl_controller/config/model/2026-10-15_18-42-34_casbot02_loco_teacher.onnx"
+    init_state:
+      stand_joint_angle:
+        leg_l1_joint: -0.185
+        leg_l2_joint: 0.0
+        leg_l3_joint: 0.0
+        leg_l4_joint: 0.36
+        leg_l5_joint: -0.175
+        leg_l6_joint: 0.0
+        leg_r1_joint: -0.185
+        leg_r2_joint: 0.0
+        leg_r3_joint: 0.0
+        leg_r4_joint: 0.36
+        leg_r5_joint: -0.175
+        leg_r6_joint: 0.0
+        upper_left1_joint: 0.0
+        upper_left2_joint: 0.0
+        upper_left3_joint: 0.0
+        upper_left4_joint: 0.0
+        upper_left5_joint: 0.0
+        upper_right1_joint: 0.0
+
+        upper_right2_joint: 0.0
+        upper_right3_joint: 0.0
+        upper_right4_joint: 0.0
+        upper_right5_joint: 0.0
+      default_joint_angle:
+        leg_l1_joint: -0.185
+        leg_l2_joint: 0.0
+        leg_l3_joint: 0.0
+        leg_l4_joint: 0.36
+        leg_l5_joint: -0.175
+        leg_l6_joint: 0.0
+        leg_r1_joint: -0.185
+        leg_r2_joint: 0.0
+        leg_r3_joint: 0.0
+        leg_r4_joint: 0.36
+        leg_r5_joint: -0.175
+        leg_r6_joint: 0.0
+        upper_left1_joint: 0.1
+        upper_left2_joint: 0.175
+        upper_left3_joint: 0.0
+        upper_left4_joint: -0.35
+        upper_left5_joint: 0.0
+        upper_right1_joint: 0.1
+        upper_right2_joint: -0.175
+        upper_right3_joint: 0.0
+        upper_right4_joint: -0.35
+        upper_right5_joint: 0.0
+
+    action_scale:
+      leg_l1_joint: 0.10855841328
+      leg_l2_joint: 0.10855841328
+      leg_l3_joint: 0.17468774565
+      leg_l4_joint: 0.10855841328
+      leg_l5_joint: 0.17468774565
+      leg_l6_joint: 0.17468774565
+      leg_r1_joint: 0.10855841328
+      leg_r2_joint: 0.10855841328
+      leg_r3_joint: 0.17468774565
+      leg_r4_joint: 0.10855841328
+      leg_r5_joint: 0.17468774565
+      leg_r6_joint: 0.17468774565
+
+    control:
+      enable_cmd_vel_slew_x: true
+      cmd_vel_slew_rate_x: 1.0
+      # Band-style: interpolate each 50 Hz joint target over one policy period
+      # in the 1 kHz control loop. Set false for zero-order-hold A/B testing.
+      enable_joint_target_interpolation: false
+      stand:
+        stiffness:
+          leg_l1_joint: 400
+          leg_l2_joint: 500
+          leg_l3_joint: 380
+          leg_l4_joint: 440
+          leg_l5_joint: 120
+          leg_l6_joint: 80
+          leg_r1_joint: 400
+          leg_r2_joint: 500
+          leg_r3_joint: 380
+          leg_r4_joint: 440
+          leg_r5_joint: 120
+          leg_r6_joint: 80
+        damping:
+          leg_l1_joint: 15
+          leg_l2_joint: 15
+          leg_l3_joint: 5
+          leg_l4_joint: 15
+          leg_l5_joint: 3
+          leg_l6_joint: 3
+          leg_r1_joint: 15
+          leg_r2_joint: 15
+          leg_r3_joint: 5
+          leg_r4_joint: 15
+          leg_r5_joint: 3
+          leg_r6_joint: 3
+      walk:
+        stiffness:
+          leg_l1_joint: 276.35
+          leg_l2_joint: 276.35
+          leg_l3_joint: 114.49
+          leg_l4_joint: 276.35
+          leg_l5_joint: 114.49
+          leg_l6_joint: 114.49
+          leg_r1_joint: 276.35
+          leg_r2_joint: 276.35
+          leg_r3_joint: 114.49
+          leg_r4_joint: 276.35
+          leg_r5_joint: 114.49
+          leg_r6_joint: 114.49
+        damping:
+          leg_l1_joint: 17.59
+          leg_l2_joint: 17.59
+          leg_l3_joint: 7.29
+          leg_l4_joint: 17.59
+          leg_l5_joint: 7.29
+          leg_l6_joint: 7.29
+          leg_r1_joint: 17.59
+          leg_r2_joint: 17.59
+          leg_r3_joint: 7.29
+          leg_r4_joint: 17.59
+          leg_r5_joint: 7.29
+          leg_r6_joint: 7.29
+      decimation: 20 #  rl:50Hz ; control:1000Hz
+      dt: 0.001 # 1000Hz
+
+    waist:
+      kp: 1000
+      kd: 49
+
+    normalization:
+      clip_scales:
+        clip_observations: 100.0
+        clip_actions: 12.0
+      cmd_vel_bias:
+        cmd_vel_bias_x: 0.0
+        cmd_vel_bias_y: 0.0
+        cmd_vel_bias_yaw: 0.0
+
+    size:
+      actions_size: 12
+      observations_size: 45
+      history_size: 4
+      input_size: 196 # 45*4 + 4 phase frames, oldest -> newest; each [sinL, cosL, sinR, cosR]
