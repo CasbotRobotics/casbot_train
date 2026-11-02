@@ -1,25 +1,262 @@
-# CASBOT02 mjlab loco
+# CASBOT02 loco 强化学习训练：从零开始训练与仿真
 
-CASBOT02 平地速度跟踪训练版。完整操作说明见 [训练流程.md](训练流程.md)。
+按顺序操作即可完成：
 
-本项目提供机器人 XML/STL、PPO 训练、play、ONNX 导出和 MuJoCo sim2sim。
-训练任务：`Casbot02-Loco-Teacher-Flat`；actor 输入196维，critic 输入208维，输出12个腿部关节动作。
-手臂随左右膝关节差自动摆动，不占策略动作维度。
+**拉取代码 → 安装环境 → 检查环境 → 训练 → play → 导出 ONNX → sim2sim。**
+
+只需机器人模型，无需人体动作数据、AMP 模型或其他教师模型。
+
+## 1. 准备电脑
+
+推荐基线是 Ubuntu 22.04/24.04、Linux x86_64、NVIDIA 显卡、稳定网络。
+训练需要 NVIDIA GPU；CPU 可用于基础检查，不能代替 GPU 训练性能验证。
+GPU 显存决定可以同时运行的环境数量，先用32个环境检查流程，再逐步增加到512、1024、4096。
+首次安装需下载 Python、PyTorch、mjlab 和其他依赖，预留数十 GB 磁盘空间。
+
+打开终端，检查显卡：
+
+```bash
+nvidia-smi
+```
+
+正常应看到 GPU 型号和驱动版本。如果提示无法与驱动通信，先解决 NVIDIA 驱动问题；重装 Python 包无法修复驱动。
+PyTorch 使用 CUDA 12.9 wheel。环境检查能实际创建 GPU 张量后，再进入训练。
+通常无需另外安装系统 CUDA Toolkit；显卡驱动仍必须兼容所选 PyTorch 和 Warp。
+
+安装 Git、下载工具和图形窗口需要的库：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl build-essential libgl1 libegl1 libglfw3 libosmesa6
+```
+
+## 2. 从公司 GitLab 拉取代码
+
+```bash
+git clone "$CASBOT_REPO_URL" casbot02_mjlab
+cd casbot02_mjlab
+```
+
+后续命令均在这个项目根目录执行。`ls` 应能看到 `pyproject.toml`、`uv.lock`、`train.sh`、`play.sh` 和 `scripts/`。
+
+## 3. 安装 uv 和 Python 环境
+
+本项目用 uv 管理 Python 和依赖，安装方法来自 [uv 官方文档](https://docs.astral.sh/uv/getting-started/installation/)。
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv --version
+```
+
+这个 `export` 只影响当前终端；如果新终端找不到 uv，可重新执行它，或按安装程序提示加载 shell 配置。
+
+安装 Python 3.10，以及锁定的训练、sim2sim 和测试依赖：
+
+```bash
+uv python install 3.10
+uv sync --locked --extra sim2sim --python 3.10
+```
+
+uv 会在项目内创建 `.venv`，不需要手动激活。后面的 `uv run --no-sync` 使用这个环境。
+固定基线：mjlab v1.4.0、MuJoCo 3.8.1、PyTorch 2.8.0、RSL-RL 5.2.0；完整解析版本见 `uv.lock`。
 
 
-## 文件导航
 
-| 文件 | 用途 |
+
+## 4. 检查环境与机器人资源
+
+```bash
+uv run --no-sync python scripts/check_env.py --require-cuda
+uv run --no-sync python -c "import torch; print(torch.ones(1, device='cuda'))"
+```
+
+应看到：
+
+- `CUDA available: True` 和显卡名称。
+- `Robot assets OK`，表示 XML 及引用的 STL 都能加载。
+- `actor=196, critic=208, action=12`。
+- GPU 张量输出中包含 `device='cuda:0'`。
+
+检查命令参数是否可用：
+
+```bash
+uv run --no-sync train Casbot02-Loco-Teacher-Flat --help
+uv run --no-sync play Casbot02-Loco-Teacher-Flat --help
+```
+
+本项目仅注册自定义任务 `Casbot02-Loco-Teacher-Flat`。mjlab 自带任务可能也显示在工具列表中，本流程只使用 Casbot02 任务。
+
+还可以先运行不打开窗口的小型环境/PPO 检查：
+
+```bash
+uv run --no-sync python scripts/smoke_test.py --device cuda:0 --ppo
+```
+
+它只运行两个环境、检查有限值并训练一次迭代；输出模型仅用于检查流程，不能当作训练完成的策略。
+第一次 Warp 内核编译可能耗时较长；出现编译输出后请等待。
+
+## 5. 开启训练
+
+先用小配置检查两次迭代：
+
+```bash
+bash train.sh --gpu-ids '[0]' --env.scene.num-envs 32 --agent.max-iterations 2
+```
+
+终端应显示选用的 GPU、日志目录、学习迭代和奖励；两次迭代后正常退出。
+然后正式训练，例如：
+
+```bash
+bash train.sh --gpu-ids '[0]' --env.scene.num-envs 4096 --agent.max-iterations 20001
+```
+
+训练默认不打开图形窗口。如果显存不足，改成1024或512：
+
+```bash
+bash train.sh --gpu-ids '[0]' --env.scene.num-envs 1024 --agent.max-iterations 20001
+```
+
+也可直接使用完整入口：
+
+```bash
+uv run --no-sync train Casbot02-Loco-Teacher-Flat \
+  --gpu-ids '[0]' \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 20001
+```
+也可使用已有的简化训练入口，选择第0张 GPU，其余参数使用当前配置默认值：
+
+```bash
+bash train.sh --gpu-ids '[0]'
+```
+
+输出目录结构：
+
+```text
+logs/rsl_rl/casbot02_loco_teacher/<时间戳>_casbot02_loco_teacher/
+├── params/env.yaml       # 本次环境、奖励、电机和观测配置快照
+├── params/agent.yaml     # 本次 PPO 参数快照
+├── events.out.tfevents.* # TensorBoard 曲线
+├── model_0.pt
+├── model_1000.pt
+└── model_20000.pt        # 示例；以实际生成的文件为准
+```
+
+每1000次迭代保存一次检查点，训练结束也会保存。`Ctrl+C` 可停止进程；续训使用磁盘上已经保存的检查点。
+任务名、日志目录名和文件名区分大小写。
+
+## 6. 查看训练曲线与续训
+
+新开一个终端，进入同一项目目录：
+
+```bash
+cd ~/Desktop/casbot02_mjlab
+uv run --no-sync tensorboard --logdir logs/rsl_rl/casbot02_loco_teacher --port 6006
+```
+
+浏览器打开 `http://localhost:6006`，查看 `Train/mean_reward`、`Train/mean_episode_length`、速度跟踪误差和各奖励曲线。
+奖励值改善并不自动保证动作好看，仍需后面的 play 和 sim2sim。
+
+续训时先列出训练目录和已有检查点：
+
+```bash
+ls logs/rsl_rl/casbot02_loco_teacher
+```
+
+输入实际的目录名和检查点名，例如选择 `model_4000.pt`：
+
+```bash
+read -r -p "训练目录名（只填时间戳目录名）: " CASBOT_RUN_NAME
+read -r -p "检查点文件名（例如 model_4000.pt）: " CASBOT_CHECKPOINT_NAME
+bash train.sh \
+  --gpu-ids '[0]' \
+  --env.scene.num-envs 4096 \
+  --agent.resume True \
+  --agent.load-run "$CASBOT_RUN_NAME" \
+  --agent.load-checkpoint "$CASBOT_CHECKPOINT_NAME" \
+  --agent.max-iterations 16001
+```
+
+`max-iterations` 是本次额外训练的迭代数。加载迭代4000的模型再训练16001次，通常得到迭代20000附近的最终模型。
+续训使用当前代码中的环境参数，不自动恢复旧 `env.yaml`；修改奖励前后应保留记录。
+当前教师是196维输入。
+
+## 7. play：在训练环境中看策略
+
+找到想测试的 `.pt` 文件，输入它相对项目根目录的路径：
+
+```bash
+read -r -p "检查点路径（logs/.../model_20000.pt）: " CASBOT_CHECKPOINT
+bash play.sh "$CASBOT_CHECKPOINT" --viewer native
+```
+
+`native` 打开本机 MuJoCo 窗口，需要图形桌面；关闭窗口结束播放。
+play 使用单个环境，并关闭训练域随机化和扰动，因此主要用来观察策略本身。
+它仍可能自动采样速度指令；想手动控制速度，可以使用浏览器界面：
+
+```bash
+bash play.sh "$CASBOT_CHECKPOINT" --viewer viser
+```
+
+按终端输出的地址打开浏览器，在命令面板找到 `twist`，启用控制滑块，设置前进速度和转弯速度。
+测试站立时将 `vx、vy、wz` 全部设为0；原地转弯时设置 `vx=vy=0`，逐渐增加 `wz`。
+
+若在远程服务器上运行，可把终端实际显示的 Web 端口通过 SSH 转发到本机；端口以终端输出为准。
+
+上手后直接导出onnx进行sim2sim即可。
+## 8. 导出 ONNX
+
+`.pt` 用于训练和 play；`.onnx` 用于独立 sim2sim 推理。
+下面命令会把 ONNX 写在检查点的同一目录，文件名为该训练目录名：
+
+```bash
+PYTHONPATH=. uv run python scripts/export_casbot02_onnx.py   Casbot02-Loco-Teacher-Flat   logs/rsl_rl/casbot02_loco_teacher/2026-10-15_18-42-34_casbot02_loco_teacher/model_20000.pt
+```
+
+也可指定固定输出位置：
+
+```bash
+uv run --no-sync python scripts/export_casbot02_onnx.py \
+  "$CASBOT_CHECKPOINT" --output logs/export/casbot02_loco.onnx
+```
+
+导出包含观测归一化，输出12个关节动作。导出脚本使用 CPU 构建单环境，首次运行可能编译 Warp 内核。
+
+## 9. sim2sim：在独立 MuJoCo 中运行 ONNX
+
+使用上一步固定输出的文件：
+
+```bash
+PYTHONPATH=. uv run python scripts/sim2sim_casbot02_loco_onnx.py logs/rsl_rl/casbot02_loco_teacher/2026-10-15_18-42-34_casbot02_loco_teacher/2026-10-15_18-42-34_casbot02_loco_teacher.onnx 
+```
+
+窗口出现后，先点击窗口让它获得键盘焦点：
+
+| 按键 | 功能 |
 |---|---|
-| `src/wbc_mjlab/casbot02_config.py` | 奖励、观测、速度课程、随机化、环境数量 |
-| `src/wbc_mjlab/casbot02_constants.py` | 机器人结构路径、默认姿态、电机参数、动作缩放 |
-| `src/wbc_mjlab/casbot02_rl_cfg.py` | PPO 网络、学习率、迭代数、对称增强 |
-| `src/wbc_mjlab/CASBOT02_7dof/` | 当前训练机器人 XML 和引用的 STL |
-| `train.sh` / `play.sh` | 训练和播放入口 |
-| `scripts/export_casbot02_onnx.py` | 导出包含观测归一化的 ONNX |
-| `scripts/sim2sim_casbot02_loco_onnx.py` | 独立 MuJoCo ONNX 播放与 CSV 记录 |
-| `SOURCE_MANIFEST.json` | 提取来源版本及原始文件哈希 |
+| ↑／↓ | 增加／减少前进速度，每次0.1 m/s |
+| ←／→ | 增加／减少转弯速度，每次0.1 rad/s |
+| 空格 | 三个速度指令清零 |
 
+脚本默认前进指令为0.5 m/s，打开后会尝试行走；先按空格可观察站立。
+只观察原地转弯时，先按空格清零，再按左右方向键。侧向速度 `vy` 在本项目默认训练中为0。
+`--log-csv` 自动保存至 `logs/sim2sim_csv/`，可用于分析指令、脚部高度、关节状态和力矩。
+关闭窗口结束程序。没有图形桌面的服务器无法直接打开这个 viewer，可把 ONNX 和项目带到有桌面的机器播放。
+
+当前策略观测由四帧本体历史180维与四帧历史左右脚相位16维组成，顺序按 term-major 拼接。
+
+脚本中的196维布局、观测归一化、电机参数和动作缩放都要与训练一致。
+
+## 10. 配置在哪里改
+
+| 配置文件 | 常见修改 |
+|---|---|
+| `casbot02_config.py` | 奖励权重、脚高目标、速度课程、随机化、相位 |
+| `casbot02_constants.py` | kp/kd、armature、关节限位相关模型、默认姿态、动作缩放 |
+| `casbot02_rl_cfg.py` | 学习率、网络大小、训练迭代数、保存间隔 |
+
+本项目先学习仿真 loco，真机程序需要单独对齐196维观测、相位、电机映射、kp/kd和动作缩放。
 
 
 
